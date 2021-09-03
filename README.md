@@ -27,7 +27,7 @@ AllowedIP='123.456.789.10/32' # input IP you are using now
 AZ=us-west-1b # availability zone 
 ```
 
-You can check your IP below command. 
+You can check your IP by using below command. 
 ```
 curl https://checkip.amazonaws.com
 ```
