@@ -1,0 +1,188 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description:
+  Create ProxyServer, Subnet and Security Group
+Parameters:
+  Service:
+    Type: String
+    Default: "proxy-server"
+  VpcCidrBlock:
+    Type: String
+    Default: "10.0.0.0/16"
+  PublicSubnetCidrBlock:
+    Type: String
+    Default: "10.0.10.0/24"
+  AMI:
+    Type: String
+    Default: "ami-011996ff98de391d1"
+  InstanceType:
+    Type: String
+    Default: "t2.micro"
+  KEYNAME:
+    Type: String
+    Default: testkey # [TODO]
+  PORT:
+    Type: String
+    Default: 3128 # [TODO]
+  AllowedIP:
+    Type: String
+    Default: "0.0.0.0/0" # [TODO]
+  AZ:
+    Type: String
+    Default: "ap-northeast-1a" # [TODO]
+Resources:
+  VPC:
+    Type: "AWS::EC2::VPC"
+    Properties:
+      CidrBlock: !Ref VpcCidrBlock
+      EnableDnsSupport: "true"
+      EnableDnsHostnames: "true"
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: !Sub "${Service}-VPC"
+        - Key: Service
+          Value: !Sub "${Service}"
+  InternetGateway:
+    Type: "AWS::EC2::InternetGateway"
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${Service}-internet-gateway"
+        - Key: Service
+          Value: !Sub "${Service}"
+  InternetGatewayAttachment:
+    Type: "AWS::EC2::VPCGatewayAttachment"
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC 
+  PublicSubnet01:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      AvailabilityZone: !Ref AZ
+      CidrBlock: !Ref PublicSubnetCidrBlock
+      VpcId: !Ref VPC 
+      Tags:
+        - Key: Name
+          Value: !Sub "${Service}-public-1"
+        - Key: Service
+          Value: !Sub "${Service}"
+  SecurityGroup01:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${Service}-security-group-01"
+      GroupDescription: !Sub "${Service} SecurityGroup"
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - CidrIp: "0.0.0.0/0"
+          Description: "ssh"
+          FromPort: 22
+          IpProtocol: "tcp"
+          ToPort: 22
+        - CidrIp: "0.0.0.0/0"
+          Description: "proxy server port"
+          FromPort: !Sub ${PORT}
+          IpProtocol: "tcp"
+          ToPort: !Sub ${PORT}
+      Tags:
+        - Key: Name
+          Value: !Sub "${Service}-security-group-01"
+        - Key: Service
+          Value: !Sub "${Service}"
+  PublicSubnetRouteTable:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref VPC 
+      Tags:
+        - Key: Name
+          Value: !Sub "${Service}-public-subnet01-route-table"
+        - Key: Service
+          Value: !Sub "${Service}"
+  PublicSubnetRoute:
+    Type: "AWS::EC2::Route"
+    Properties:
+      RouteTableId: !Ref PublicSubnetRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway 
+  PublicSubnetRouteTableAssociation:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      SubnetId: !Ref PublicSubnet01 
+      RouteTableId: !Ref PublicSubnetRouteTable
+  ProxyServerEC2:
+    Type: AWS::EC2::Instance
+    DependsOn: SecurityGroup01
+    Properties:
+      AvailabilityZone: !Ref AZ 
+      ImageId: !Sub "${AMI}"
+      InstanceType: !Sub "${InstanceType}"
+      KeyName: !Sub "${KEYNAME}"
+      Tags:
+        - Key: Name
+          Value: !Sub "${Service}-ProxyServer"
+        - Key: Role
+          Value: "ProxyServer"
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: "true"
+          DeviceIndex: "0"
+          GroupSet: 
+            - !Ref SecurityGroup01
+          SubnetId: !Ref PublicSubnet01
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash
+            yum update -y
+            yum -y install squid
+            echo '
+            acl myacl src ${ALLOWED_IP}
+            acl localnet src 10.0.0.0/8	# RFC1918 possible internal network
+            acl localnet src 172.16.0.0/12	# RFC1918 possible internal network
+            acl localnet src 192.168.0.0/16	# RFC1918 possible internal network
+            acl localnet src fc00::/7       # RFC 4193 local private network range
+            acl localnet src fe80::/10      # RFC 4291 link-local (directly plugged) machines
+
+            acl SSL_ports port 443
+            acl Safe_ports port 80		# http
+            acl Safe_ports port 21		# ftp
+            acl Safe_ports port 443		# https
+            acl Safe_ports port 70		# gopher
+            acl Safe_ports port 210		# wais
+            acl Safe_ports port 1025-65535	# unregistered ports
+            acl Safe_ports port 280		# http-mgmt
+            acl Safe_ports port 488		# gss-http
+            acl Safe_ports port 591		# filemaker
+            acl Safe_ports port 777		# multiling http
+            acl CONNECT method CONNECT
+
+            http_access deny !Safe_ports
+            http_access deny CONNECT !SSL_ports
+            http_access allow localhost manager
+            http_access deny manager
+
+            http_access allow localnet
+            http_access allow localhost
+            http_access allow myacl
+            http_access deny all
+
+            http_port ${PORT}
+            coredump_dir /var/spool/squid
+
+            refresh_pattern ^ftp:		1440	20%	10080
+            refresh_pattern ^gopher:	1440	0%	1440
+            refresh_pattern -i (/cgi-bin/|\?) 0	0%	0
+            refresh_pattern .		0	20%	4320
+
+            visible_hostname unknown
+            forwarded_for off
+            request_header_access X-Forwarded-For deny all
+            request_header_access Via deny all
+            request_header_access Cache-Control deny all
+            logformat combined %>a %<la %ui %un [%tl] "%rm %ru HTTP/%rv" %>Hs %<st "%{Referer}>h" "%{User-Agent}>h" %Ss:%Sh
+            access_log /var/log/squid/access.log combined
+
+            ' > /etc/squid/squid.conf
+            systemctl restart squid
+          - {
+              Port: !Ref PORT,
+              ALLOWED_IP: !Ref AllowedIP,
+            }
